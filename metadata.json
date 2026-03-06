@@ -1,0 +1,5 @@
+{
+  "name": "standalone: TenderSim Monte-Carlo Estimator",
+  "description": "Professional tender estimation tool using Monte Carlo simulations to calculate risk-adjusted engineering project costs.",
+  "requestFramePermissions": []
+}

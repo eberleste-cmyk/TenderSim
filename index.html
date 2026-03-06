@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TenderSim Monte-Carlo Estimator</title>
+    <!-- Tailwind Play CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Babel for JSX transformation in the browser -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'monospace'],
+                    },
+                }
+            }
+        }
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+        
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #ccc;
+            border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #999;
+        }
+        
+        .recharts-responsive-container {
+            width: 100% !important;
+            height: 100% !important;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        window.process = { env: { NODE_ENV: 'production' } };
+        
+        import React, { useState, useMemo, useRef, useEffect } from 'https://esm.sh/react@19';
+        import { createRoot } from 'https://esm.sh/react-dom@19/client';
+        import { 
+            Calculator, Plus, Trash2, Play, BarChart3, Info, Settings, AlertTriangle,
+            ChevronRight, ChevronDown, ChevronLeft, FileText, TrendingUp, ShieldCheck,
+            Save, Download, Upload, Search
+        } from 'https://esm.sh/lucide-react';
+        import { 
+            BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
+            AreaChart, Area, ReferenceLine 
+        } from 'https://esm.sh/recharts';
+        import { motion, AnimatePresence } from 'https://esm.sh/motion/react';
+        import * as XLSX from 'https://esm.sh/xlsx';
+
+        // --- Simulation Logic ---
+        function sampleTriangular(min, likely, max) {
+            if (min === max) return min;
+            const u = Math.random();
+            const fc = (likely - min) / (max - min);
+            if (u < fc) {
+                return min + Math.sqrt(u * (max - min) * (likely - min));
+            } else {
+                return max - Math.sqrt((1 - u) * (max - min) * (max - likely));
+            }
+        }
+
+        function getAllTasks(tasks) {
+            let all = [];
+            for (const task of tasks) {
+                all.push(task);
+                if (task.subTasks && task.subTasks.length > 0) {
+                    all = all.concat(getAllTasks(task.subTasks));
+                }
+            }
+            return all;
+        }
+
+        function runSimulation(state) {
+            const { iterations, tasks, roles, overheadDays, profitMargin } = state;
+            const internalResults = [];
+            const externalResults = [];
+            
+            const flatTasks = getAllTasks(tasks);
+            const roleMap = new Map(roles.map(r => [r.id, r]));
+
+            const avgInternalRate = roles.length > 0 
+                ? roles.reduce((sum, r) => sum + r.rate1, 0) / roles.length 
+                : 0;
+            const avgExternalRate = roles.length > 0 
+                ? roles.reduce((sum, r) => sum + r.rate2, 0) / roles.length 
+                : 0;
+
+            for (let i = 0; i < iterations; i++) {
+                let iterationInternalCost = 0;
+                let iterationExternalCost = 0;
+                
+                for (const task of flatTasks) {
+                    if (task.roleId) {
+                        const days = sampleTriangular(task.minDays, task.likelyDays, task.maxDays);
+                        const role = roleMap.get(task.roleId);
+                        if (role) {
+                            iterationInternalCost += days * role.rate1;
+                            iterationExternalCost += days * role.rate2;
+                        }
+                    }
+                }
+
+                iterationInternalCost += overheadDays * avgInternalRate;
+                iterationExternalCost += overheadDays * avgExternalRate;
+
+                const finalInternal = iterationInternalCost * (1 + profitMargin / 100);
+                const finalExternal = iterationExternalCost * (1 + profitMargin / 100);
+                
+                internalResults.push(finalInternal);
+                externalResults.push(finalExternal);
+            }
+
+            const processResults = (results) => {
+                results.sort((a, b) => a - b);
+                const sum = results.reduce((a, b) => a + b, 0);
+                const mean = sum / iterations;
+                const min = results[0];
+                const max = results[iterations - 1];
+                const p50 = results[Math.floor(iterations * 0.5)];
+                const p80 = results[Math.floor(iterations * 0.8)];
+                const p90 = results[Math.floor(iterations * 0.9)];
+
+                const binCount = 30;
+                const binSize = (max - min) / binCount || 1;
+                const histogram = [];
+                for (let i = 0; i < binCount; i++) {
+                    const binStart = min + i * binSize;
+                    const binEnd = binStart + binSize;
+                    const count = results.filter(r => 
+                        i === binCount - 1 ? (r >= binStart && r <= max) : (r >= binStart && r < binEnd)
+                    ).length;
+                    histogram.push({ bin: Math.round(binStart), count });
+                }
+
+                const cumulative = [];
+                const points = 100;
+                for (let i = 0; i <= points; i++) {
+                    const index = Math.min(iterations - 1, Math.floor((i / points) * iterations));
+                    cumulative.push({ 
+                        value: Math.round(results[index]), 
+                        probability: (i / points) * 100 
+                    });
+                }
+
+                return { totalCosts: results, p50, p80, p90, min, max, mean, histogram, cumulative };
+            };
+
+            return {
+                internal: processResults(internalResults),
+                external: processResults(externalResults)
+            };
+        }
+
+        // --- Excel Export Logic ---
+        function saveToXLSX(state, result) {
+            const wb = XLSX.utils.book_new();
+            const summaryData = [
+                ['Project Configuration', 'Value'],
+                ['Project Name', state.projectName],
+                ['Responsible', state.responsibleName],
+                ['Iterations', state.iterations],
+                ['Currency', state.currency],
+                ['Rate 1 Name', state.rate1Name],
+                ['Rate 2 Name', state.rate2Name],
+                [],
+                ['Simulation Results', 'Cost'],
+            ];
+
+            if (result) {
+                summaryData.push(
+                    ['Internal Results', ''],
+                    ['Mean Estimate', result.internal.mean],
+                    ['P50 (Median)', result.internal.p50],
+                    ['P80 (Recommended)', result.internal.p80],
+                    ['P90 (Conservative)', result.internal.p90],
+                    ['Minimum Observed', result.internal.min],
+                    ['Maximum Observed', result.internal.max],
+                    [],
+                    ['External Results', ''],
+                    ['Mean Estimate', result.external.mean],
+                    ['P50 (Median)', result.external.p50],
+                    ['P80 (Recommended)', result.external.p80],
+                    ['P90 (Conservative)', result.external.p90],
+                    ['Minimum Observed', result.external.min],
+                    ['Maximum Observed', result.external.max]
+                );
+            } else {
+                summaryData.push(['No simulation results available. Run simulation first.']);
+            }
+
+            const summaryWs = XLSX.utils.aoa_to_sheet(summaryData);
+            XLSX.utils.book_append_sheet(wb, summaryWs, 'Summary');
+
+            const flattenTasks = (tasks, depth = 0) => {
+                let flat = [];
+                tasks.forEach(task => {
+                    const role = state.roles.find(r => r.id === task.roleId)?.name || '';
+                    flat.push({
+                        'Level': depth,
+                        'Package': depth === 0 ? task.name : '',
+                        'Task': depth > 0 ? task.name : '',
+                        'Role': role,
+                        'Min (Days)': task.minDays,
+                        'Likely (Days)': task.likelyDays,
+                        'Max (Days)': task.maxDays,
+                        'Comments': task.comments || '',
+                        'ID': String(task.id),
+                        'ParentID': (task.parentId !== undefined && task.parentId !== null && String(task.parentId) !== '') ? String(task.parentId) : ''
+                    });
+                    if (task.subTasks) {
+                        flat = [...flat, ...flattenTasks(task.subTasks, depth + 1)];
+                    }
+                });
+                return flat;
+            };
+
+            const flatTasks = flattenTasks(state.tasks);
+            const tasksWs = XLSX.utils.json_to_sheet(flatTasks);
+            XLSX.utils.book_append_sheet(wb, tasksWs, 'Work Packages');
+
+            const rolesData = state.roles.map(r => ({
+                'Role Name': r.name,
+                [state.rate1Name || 'Rate 1']: r.rate1,
+                [state.rate2Name || 'Rate 2']: r.rate2,
+                'ID': String(r.id)
+            }));
+            const rolesWs = XLSX.utils.json_to_sheet(rolesData);
+            XLSX.utils.book_append_sheet(wb, rolesWs, 'Roles');
+
+            const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+            const blob = new Blob([wbout], { type: 'application/octet-stream' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `${state.projectName.replace(/\s+/g, '_')}_Estimate.xlsx`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        }
+
+        async function loadFromXLSX(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const data = new Uint8Array(e.target.result);
+                        const workbook = XLSX.read(data, { type: 'array' });
+                        const summaryWs = workbook.Sheets['Summary'];
+                        const summaryAoa = XLSX.utils.sheet_to_json(summaryWs, { header: 1 });
+                        const projectName = summaryAoa.find(row => row[0] === 'Project Name')?.[1] || 'Imported Project';
+                        const responsibleName = summaryAoa.find(row => row[0] === 'Responsible')?.[1] || '';
+                        const rate1Name = summaryAoa.find(row => row[0] === 'Rate 1 Name')?.[1] || 'Rate 1';
+                        const rate2Name = summaryAoa.find(row => row[0] === 'Rate 2 Name')?.[1] || 'Rate 2';
+
+                        const rolesWs = workbook.Sheets['Roles'];
+                        const rolesJson = XLSX.utils.sheet_to_json(rolesWs);
+                        const roles = rolesJson.map(r => ({
+                            id: String(r['ID'] || Math.random().toString(36).substr(2, 9)),
+                            name: r['Role Name'],
+                            rate1: Number(r[rate1Name] || r['Rate 1'] || 0),
+                            rate2: Number(r[rate2Name] || r['Rate 2'] || 0)
+                        }));
+
+                        const tasksWs = workbook.Sheets['Work Packages'];
+                        const tasksJson = XLSX.utils.sheet_to_json(tasksWs);
+                        const rootTasks = [];
+                        const lastTaskAtLevel = {};
+
+                        tasksJson.forEach((t) => {
+                            const level = Number(t['Level'] || 0);
+                            const id = t['ID'] !== undefined && t['ID'] !== null && String(t['ID']) !== '' ? String(t['ID']) : Math.random().toString(36).substr(2, 9);
+                            let parentId = t['ParentID'] !== undefined && t['ParentID'] !== null && String(t['ParentID']) !== '' ? String(t['ParentID']).trim() : undefined;
+                            if (!parentId && level > 0) {
+                                const potentialParent = lastTaskAtLevel[level - 1];
+                                if (potentialParent) parentId = potentialParent.id;
+                            }
+                            const task = {
+                                id,
+                                name: (t['Package'] || t['Task'] || '').trim(),
+                                roleId: roles.find(r => r.name === t['Role'])?.id || '',
+                                minDays: Number(t['Min (Days)'] || 0),
+                                likelyDays: Number(t['Likely (Days)'] || 0),
+                                maxDays: Number(t['Max (Days)'] || 0),
+                                comments: t['Comments'] || '',
+                                parentId,
+                                subTasks: []
+                            };
+                            lastTaskAtLevel[level] = task;
+                            if (parentId) {
+                                const findAndAdd = (list) => {
+                                    for (const p of list) {
+                                        if (p.id === parentId) {
+                                            if (!p.subTasks) p.subTasks = [];
+                                            p.subTasks.push(task);
+                                            return true;
+                                        }
+                                        if (p.subTasks && findAndAdd(p.subTasks)) return true;
+                                    }
+                                    return false;
+                                };
+                                if (!findAndAdd(rootTasks)) rootTasks.push(task);
+                            } else {
+                                rootTasks.push(task);
+                            }
+                        });
+                        resolve({ projectName, responsibleName, rate1Name, rate2Name, roles, tasks: rootTasks });
+                    } catch (err) { reject(err); }
+                };
+                reader.onerror = reject;
+                reader.readAsArrayBuffer(file);
+            });
+        }
+
+        // --- App Component ---
+        const INITIAL_ROLES = [
+            { id: 'r1', name: 'Senior Engineer', rate1: 1000, rate2: 1200 },
+            { id: 'r2', name: 'Junior Engineer', rate1: 600, rate2: 750 },
+            { id: 'r3', name: 'Project Manager', rate1: 1200, rate2: 1500 },
+        ];
+
+        const INITIAL_STATE = {
+            projectName: "Engineering Tender Estimate",
+            responsibleName: "John Doe",
+            currency: "EUR",
+            rate1Name: "Internal",
+            rate2Name: "External",
+            roles: INITIAL_ROLES,
+            tasks: [
+                { 
+                    id: 't1', 
+                    name: '1.0 Design Phase', 
+                    roleId: '', 
+                    minDays: 0, likelyDays: 0, maxDays: 0,
+                    subTasks: [
+                        { id: 't1-1', name: '1.1 Concept Development', roleId: 'r1', minDays: 5, likelyDays: 8, maxDays: 12 },
+                        { id: 't1-2', name: '1.2 Internal Review', roleId: 'r3', minDays: 1, likelyDays: 2, maxDays: 3 },
+                    ]
+                },
+                { id: 't2', name: '2.0 Implementation', roleId: 'r2', minDays: 10, likelyDays: 15, maxDays: 25 },
+            ],
+            overheadDays: 0,
+            profitMargin: 0,
+            iterations: 10000,
+        };
+
+        function App() {
+            const [state, setState] = useState(INITIAL_STATE);
+            const [result, setResult] = useState(null);
+            const [activeTab, setActiveTab] = useState('inputs');
+            const [resultsView, setResultsView] = useState('internal');
+            const [selectedPackageId, setSelectedPackageId] = useState(null);
+            const [isSimulating, setIsSimulating] = useState(false);
+            const fileInputRef = useRef(null);
+
+            const [colWidths, setColWidths] = useState({
+                package: 200, task: 200, role: 120, min: 80, likely: 80, max: 80, comments: 200
+            });
+
+            const handleResize = (col, e) => {
+                const startX = e.pageX;
+                const startWidth = colWidths[col];
+                const onMouseMove = (moveEvent) => {
+                    const newWidth = Math.max(50, startWidth + (moveEvent.pageX - startX));
+                    setColWidths(prev => ({ ...prev, [col]: newWidth }));
+                };
+                const onMouseUp = () => {
+                    document.removeEventListener('mousemove', onMouseMove);
+                    document.removeEventListener('mouseup', onMouseUp);
+                };
+                document.addEventListener('mousemove', onMouseMove);
+                document.addEventListener('mouseup', onMouseUp);
+            };
+
+            const handleSaveExcel = () => saveToXLSX(state, result);
+            const handleLoadExcel = async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                try {
+                    const importedState = await loadFromXLSX(file);
+                    setState(prev => ({ ...prev, ...importedState }));
+                    setResult(null);
+                } catch (err) {
+                    alert('Error loading file. Please ensure it is a valid TenderSim XLSX file.');
+                    console.error(err);
+                }
+                if (fileInputRef.current) fileInputRef.current.value = '';
+            };
+
+            const handleRunSimulation = () => {
+                setIsSimulating(true);
+                setTimeout(() => {
+                    const res = runSimulation(state);
+                    setResult(res);
+                    setIsSimulating(false);
+                    setActiveTab('results');
+                }, 600);
+            };
+
+            const addTask = (parentId) => {
+                const newTask = {
+                    id: Math.random().toString(36).substr(2, 9),
+                    name: 'New Task',
+                    roleId: state.roles[0]?.id || '',
+                    minDays: 0, likelyDays: 0, maxDays: 0, parentId
+                };
+                const updateTasks = (tasks) => {
+                    if (!parentId) return [...tasks, newTask];
+                    return tasks.map(t => {
+                        if (t.id === parentId) return { ...t, subTasks: [...(t.subTasks || []), newTask] };
+                        if (t.subTasks) return { ...t, subTasks: updateTasks(t.subTasks) };
+                        return t;
+                    });
+                };
+                setState(prev => ({ ...prev, tasks: updateTasks(prev.tasks) }));
+            };
+
+            const removeTask = (id) => {
+                const filterTasks = (tasks) => tasks.filter(t => t.id !== id).map(t => ({ ...t, subTasks: t.subTasks ? filterTasks(t.subTasks) : undefined }));
+                setState(prev => ({ ...prev, tasks: filterTasks(prev.tasks) }));
+            };
+
+            const updateTask = (id, field, value) => {
+                const modifyTasks = (tasks) => tasks.map(t => {
+                    if (t.id === id) return { ...t, [field]: value };
+                    if (t.subTasks) return { ...t, subTasks: modifyTasks(t.subTasks) };
+                    return t;
+                });
+                setState(prev => ({ ...prev, tasks: modifyTasks(prev.tasks) }));
+            };
+
+            const addRole = () => {
+                const newRole = { id: Math.random().toString(36).substr(2, 9), name: 'New Role', rate1: 500, rate2: 600 };
+                setState(prev => ({ ...prev, roles: [...prev.roles, newRole] }));
+            };
+
+            const updateRole = (id, field, value) => setState(prev => ({ ...prev, roles: prev.roles.map(r => r.id === id ? { ...r, [field]: value } : r) }));
+            const removeRole = (id) => setState(prev => ({ ...prev, roles: prev.roles.filter(r => r.id !== id) }));
+
+            const formatCurrency = (val) => new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(val);
+
+            const toggleCollapse = (id) => {
+                const modifyTasks = (tasks) => tasks.map(t => {
+                    if (t.id === id) return { ...t, isCollapsed: !t.isCollapsed };
+                    if (t.subTasks) return { ...t, subTasks: modifyTasks(t.subTasks) };
+                    return t;
+                });
+                setState(prev => ({ ...prev, tasks: modifyTasks(prev.tasks) }));
+            };
+
+            const renderTaskRows = (tasks, depth = 0) => {
+                return tasks.map(task => (
+                    <React.Fragment key={task.id}>
+                        <tr className="border-b border-gray-200 hover:bg-blue-50/30 transition-colors group">
+                            <td className="border-r border-gray-200 p-0 bg-gray-50/50 w-24 text-center">
+                                <div className="flex items-center justify-center gap-1 px-1 h-full min-h-[40px]">
+                                    {depth === 0 && task.subTasks && task.subTasks.length > 0 && (
+                                        <button onClick={() => toggleCollapse(task.id)} className="p-1 hover:bg-gray-200 rounded transition-colors">
+                                            {task.isCollapsed ? <ChevronRight className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                                        </button>
+                                    )}
+                                    <button onClick={() => addTask(task.id)} title="Add Sub-task" className="p-1 text-blue-600 hover:bg-blue-100 rounded transition-colors opacity-0 group-hover:opacity-100">
+                                        <Plus className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button onClick={() => removeTask(task.id)} title="Delete Task" className="p-1 text-red-600 hover:bg-red-100 rounded transition-colors opacity-0 group-hover:opacity-100">
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                </div>
+                            </td>
+                            <td className="border-r border-gray-200 p-0" style={{ width: colWidths.package }}>
+                                {depth === 0 ? (
+                                    <textarea value={task.name} onChange={(e) => updateTask(task.id, 'name', e.target.value)} onFocus={(e) => e.target.select()} className="w-full px-2 py-2 text-sm bg-transparent border-none focus:ring-1 focus:ring-blue-400 outline-none font-bold text-gray-800 resize-none overflow-hidden" placeholder="Package Name..." rows={task.name.split('\n').length || 1} />
+                                ) : <div className="w-full h-full bg-gray-50/30" />}
+                            </td>
+                            <td className="border-r border-gray-200 p-0" style={{ width: colWidths.task }}>
+                                {depth > 0 ? (
+                                    <div className="flex items-center" style={{ paddingLeft: `${(depth - 1) * 16}px` }}>
+                                        <textarea value={task.name} onChange={(e) => updateTask(task.id, 'name', e.target.value)} onFocus={(e) => e.target.select()} className="w-full px-2 py-2 text-sm bg-transparent border-none focus:ring-1 focus:ring-blue-400 outline-none font-medium text-gray-700 resize-none overflow-hidden" placeholder="Task..." rows={task.name.split('\n').length || 1} />
+                                    </div>
+                                ) : <div className="w-full h-full bg-gray-50/30" />}
+                            </td>
+                            <td className="border-r border-gray-200 p-0" style={{ width: colWidths.role }}>
+                                <select value={task.roleId} onChange={(e) => updateTask(task.id, 'roleId', e.target.value)} className="w-full px-2 py-2 text-xs bg-transparent border-none focus:ring-1 focus:ring-blue-400 outline-none text-gray-600 appearance-none cursor-pointer">
+                                    <option value="">— Role —</option>
+                                    {state.roles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+                                </select>
+                            </td>
+                            <td className="border-r border-gray-200 p-0" style={{ width: colWidths.min }}>
+                                <input type="number" value={task.minDays} onChange={(e) => updateTask(task.id, 'minDays', Number(e.target.value))} onFocus={(e) => e.target.select()} className="w-full px-2 py-2 text-sm bg-transparent border-none focus:ring-1 focus:ring-blue-400 outline-none text-center disabled:bg-gray-100/30" disabled={!!task.subTasks?.length} />
+                            </td>
+                            <td className="border-r border-gray-200 p-0" style={{ width: colWidths.likely }}>
+                                <input type="number" value={task.likelyDays} onChange={(e) => updateTask(task.id, 'likelyDays', Number(e.target.value))} onFocus={(e) => e.target.select()} className="w-full px-2 py-2 text-sm bg-transparent border-none focus:ring-1 focus:ring-blue-400 outline-none text-center font-bold text-blue-700 disabled:bg-gray-100/30" disabled={!!task.subTasks?.length} />
+                            </td>
+                            <td className="border-r border-gray-200 p-0" style={{ width: colWidths.max }}>
+                                <input type="number" value={task.maxDays} onChange={(e) => updateTask(task.id, 'maxDays', Number(e.target.value))} onFocus={(e) => e.target.select()} className="w-full px-2 py-2 text-sm bg-transparent border-none focus:ring-1 focus:ring-blue-400 outline-none text-center disabled:bg-gray-100/30" disabled={!!task.subTasks?.length} />
+                            </td>
+                            <td className="border-r border-gray-200 p-0" style={{ width: colWidths.comments }}>
+                                <textarea value={task.comments || ''} onChange={(e) => updateTask(task.id, 'comments', e.target.value)} onFocus={(e) => e.target.select()} className="w-full px-2 py-2 text-xs bg-transparent border-none focus:ring-1 focus:ring-blue-400 outline-none text-gray-500 resize-none overflow-hidden" placeholder="Comments..." rows={task.comments?.split('\n').length || 1} />
+                            </td>
+                        </tr>
+                        {task.subTasks && !task.isCollapsed && renderTaskRows(task.subTasks, depth + 1)}
+                    </React.Fragment>
+                ));
+            };
+
+            return (
+                <div className="min-h-screen bg-[#F8F9FA] text-[#1A1C1E] font-sans">
+                    <header className="bg-white border-b border-[#E1E3E1] px-6 py-4 flex items-center justify-between sticky top-0 z-10 shadow-sm">
+                        <div className="flex items-center gap-3">
+                            <div className="bg-[#004A77] p-2 rounded-lg"><Calculator className="text-white w-6 h-6" /></div>
+                            <div><h1 className="text-xl font-bold tracking-tight text-[#001D31]">TenderSim Monte-Carlo Estimator</h1></div>
+                        </div>
+                        <div className="flex bg-[#EFF1F1] p-1 rounded-xl">
+                            <button onClick={() => setActiveTab('inputs')} className={`px-6 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === 'inputs' ? 'bg-white text-[#004A77] shadow-sm' : 'text-[#44474E] hover:bg-white/50'}`}>Inputs</button>
+                            <button onClick={() => result && setActiveTab('results')} disabled={!result} className={`px-6 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === 'results' ? 'bg-white text-[#004A77] shadow-sm' : 'text-[#44474E] hover:bg-white/50 disabled:opacity-50'}`}>Results</button>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <input type="file" ref={fileInputRef} onChange={handleLoadExcel} accept=".xlsx" className="hidden" />
+                            <button onClick={() => fileInputRef.current?.click()} className="bg-white hover:bg-gray-50 text-[#004A77] border border-[#E1E3E1] px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all shadow-sm" title="Load from Excel (.xlsx)"><Upload className="w-5 h-5" />Load</button>
+                            <button onClick={handleSaveExcel} className="bg-white hover:bg-gray-50 text-[#004A77] border border-[#E1E3E1] px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all shadow-sm" title="Save to Excel (.xlsx)"><Save className="w-5 h-5" />Save</button>
+                            <button onClick={handleRunSimulation} disabled={isSimulating} className="bg-[#004A77] hover:bg-[#003557] text-white px-6 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-blue-900/10 disabled:opacity-70">
+                                {isSimulating ? <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }}><Settings className="w-5 h-5" /></motion.div> : <Play className="w-5 h-5 fill-current" />}
+                                {isSimulating ? 'Simulating...' : 'Run Simulation'}
+                            </button>
+                        </div>
+                    </header>
+                    <main className="max-w-full mx-auto p-6">
+                        <AnimatePresence mode="wait">
+                            {activeTab === 'inputs' ? (
+                                <motion.div key="inputs" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="space-y-8">
+                                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                                        <div className="space-y-6">
+                                            <section className="bg-white p-6 rounded-2xl border border-[#E1E3E1] shadow-sm">
+                                                <h2 className="text-lg font-bold mb-4 flex items-center gap-2 text-[#001D31]"><Settings className="w-5 h-5 text-[#004A77]" />Project Configuration</h2>
+                                                <div className="space-y-4">
+                                                    <div><label className="block text-xs font-bold text-[#44474E] uppercase mb-1.5">Project Name</label><input type="text" value={state.projectName} onChange={(e) => setState(prev => ({ ...prev, projectName: e.target.value }))} onFocus={(e) => e.target.select()} className="w-full px-4 py-2.5 bg-[#F1F3F4] border-none rounded-xl focus:ring-2 focus:ring-[#004A77] outline-none transition-all" /></div>
+                                                    <div><label className="block text-xs font-bold text-[#44474E] uppercase mb-1.5">Responsible Name</label><input type="text" value={state.responsibleName} onChange={(e) => setState(prev => ({ ...prev, responsibleName: e.target.value }))} onFocus={(e) => e.target.select()} className="w-full px-4 py-2.5 bg-[#F1F3F4] border-none rounded-xl focus:ring-2 focus:ring-[#004A77] outline-none transition-all" /></div>
+                                                </div>
+                                            </section>
+                                            <section className="bg-white p-6 rounded-2xl border border-[#E1E3E1] shadow-sm">
+                                                <h2 className="text-lg font-bold mb-4 flex items-center gap-2 text-[#001D31]"><TrendingUp className="w-5 h-5 text-[#004A77]" />Simulation Config</h2>
+                                                <div className="space-y-4">
+                                                    <div><label className="block text-xs font-bold text-[#44474E] uppercase mb-1.5">Iterations</label><input type="number" value={state.iterations} onChange={(e) => setState(prev => ({ ...prev, iterations: Number(e.target.value) }))} onFocus={(e) => e.target.select()} className="w-full px-4 py-2.5 bg-[#F1F3F4] border-none rounded-xl focus:ring-2 focus:ring-[#004A77] outline-none transition-all" /></div>
+                                                    <div className="grid grid-cols-2 gap-4">
+                                                        <div><label className="block text-xs font-bold text-[#44474E] uppercase mb-1.5">Profit (%)</label><input type="number" value={state.profitMargin} onChange={(e) => setState(prev => ({ ...prev, profitMargin: Number(e.target.value) }))} onFocus={(e) => e.target.select()} className="w-full px-4 py-2.5 bg-[#F1F3F4] border-none rounded-xl focus:ring-2 focus:ring-[#004A77] outline-none transition-all" /></div>
+                                                        <div><label className="block text-xs font-bold text-[#44474E] uppercase mb-1.5">Overhead (d)</label><input type="number" value={state.overheadDays} onChange={(e) => setState(prev => ({ ...prev, overheadDays: Number(e.target.value) }))} onFocus={(e) => e.target.select()} className="w-full px-4 py-2.5 bg-[#F1F3F4] border-none rounded-xl focus:ring-2 focus:ring-[#004A77] outline-none transition-all" /></div>
+                                                    </div>
+                                                </div>
+                                            </section>
+                                        </div>
+                                        <div className="space-y-6">
+                                            <section className="bg-white p-6 rounded-2xl border border-[#E1E3E1] shadow-sm">
+                                                <div className="flex items-center justify-between mb-4">
+                                                    <h2 className="text-lg font-bold flex items-center gap-2 text-[#001D31]"><ShieldCheck className="w-5 h-5 text-[#004A77]" />Roles & Rates</h2>
+                                                    <button onClick={addRole} className="p-1.5 text-[#004A77] hover:bg-[#004A77]/5 rounded-lg"><Plus className="w-4 h-4" /></button>
+                                                </div>
+                                                <div className="space-y-4">
+                                                    <div className="flex gap-2 px-1">
+                                                        <div className="flex-1" />
+                                                        <input className="w-20 text-[10px] font-bold text-center border-b border-gray-200 outline-none focus:border-blue-500" value={state.rate1Name} onChange={(e) => setState(prev => ({ ...prev, rate1Name: e.target.value }))} onFocus={(e) => e.target.select()} placeholder="Rate 1" />
+                                                        <input className="w-20 text-[10px] font-bold text-center border-b border-gray-200 outline-none focus:border-blue-500" value={state.rate2Name} onChange={(e) => setState(prev => ({ ...prev, rate2Name: e.target.value }))} onFocus={(e) => e.target.select()} placeholder="Rate 2" />
+                                                        <div className="w-8" />
+                                                    </div>
+                                                    <div className="max-h-[300px] overflow-y-auto pr-2 space-y-3 custom-scrollbar">
+                                                        {state.roles.map(role => (
+                                                            <div key={role.id} className="flex gap-2 items-center">
+                                                                <input type="text" value={role.name} onChange={(e) => updateRole(role.id, 'name', e.target.value)} onFocus={(e) => e.target.select()} className="flex-1 px-3 py-1.5 bg-[#F1F3F4] border-none rounded-lg text-sm outline-none" />
+                                                                <input type="number" value={role.rate1} onChange={(e) => updateRole(role.id, 'rate1', Number(e.target.value))} onFocus={(e) => e.target.select()} className="w-16 px-2 py-1.5 bg-[#F1F3F4] border-none rounded-lg text-xs outline-none text-right" />
+                                                                <input type="number" value={role.rate2} onChange={(e) => updateRole(role.id, 'rate2', Number(e.target.value))} onFocus={(e) => e.target.select()} className="w-16 px-2 py-1.5 bg-[#F1F3F4] border-none rounded-lg text-xs outline-none text-right" />
+                                                                <button onClick={() => removeRole(role.id)} className="p-1 text-[#BA1A1A] hover:bg-[#BA1A1A]/5 rounded-lg"><Trash2 className="w-3.5 h-3.5" /></button>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </section>
+                                        </div>
+                                        <div className="space-y-6">
+                                            <section className="bg-white p-6 rounded-2xl border border-[#E1E3E1] shadow-sm">
+                                                <h2 className="text-lg font-bold mb-4 flex items-center gap-2 text-[#001D31]"><Search className="w-5 h-5 text-[#004A77]" />Package Inspector</h2>
+                                                <div className="space-y-4">
+                                                    <select value={selectedPackageId || ''} onChange={(e) => setSelectedPackageId(e.target.value || null)} className="w-full px-4 py-2.5 bg-[#F1F3F4] border-none rounded-xl focus:ring-2 focus:ring-[#004A77] outline-none transition-all text-sm">
+                                                        <option value="">Select a package...</option>
+                                                        <option value="total_all">Total All Packages</option>
+                                                        {state.tasks.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                                                    </select>
+                                                    {selectedPackageId && (() => {
+                                                        let pkgTasks = [];
+                                                        const getPackageTasks = (t) => {
+                                                            let tasks = [];
+                                                            if (t.roleId) tasks.push(t);
+                                                            if (t.subTasks) t.subTasks.forEach(st => { tasks = [...tasks, ...getPackageTasks(st)]; });
+                                                            return tasks;
+                                                        };
+                                                        if (selectedPackageId === 'total_all') {
+                                                            state.tasks.forEach(t => { pkgTasks = [...pkgTasks, ...getPackageTasks(t)]; });
+                                                        } else {
+                                                            const pkg = state.tasks.find(t => t.id === selectedPackageId);
+                                                            if (!pkg) return null;
+                                                            pkgTasks = getPackageTasks(pkg);
+                                                        }
+                                                        const roleSums = {};
+                                                        let totalMin = 0, totalLikely = 0, totalMax = 0;
+                                                        pkgTasks.forEach(t => {
+                                                            if (!roleSums[t.roleId]) roleSums[t.roleId] = { min: 0, likely: 0, max: 0 };
+                                                            roleSums[t.roleId].min += t.minDays; roleSums[t.roleId].likely += t.likelyDays; roleSums[t.roleId].max += t.maxDays;
+                                                            totalMin += t.minDays; totalLikely += t.likelyDays; totalMax += t.maxDays;
+                                                        });
+                                                        return (
+                                                            <div className="space-y-4 mt-4">
+                                                                <div className="bg-[#F1F3F4] p-4 rounded-xl">
+                                                                    <h3 className="text-xs font-bold text-[#44474E] uppercase mb-3">Role Breakdown (Days)</h3>
+                                                                    <div className="space-y-2 max-h-[150px] overflow-y-auto pr-1">
+                                                                        {Object.entries(roleSums).map(([roleId, sums]) => {
+                                                                            const role = state.roles.find(r => r.id === roleId);
+                                                                            return (
+                                                                                <div key={roleId} className="flex justify-between text-xs border-b border-gray-200 pb-1">
+                                                                                    <span className="font-medium text-gray-600">{role?.name || 'Unknown'}</span>
+                                                                                    <span className="font-mono">{sums.min} / {sums.likely} / {sums.max}</span>
+                                                                                </div>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                </div>
+                                                                <div className="bg-[#004A77]/5 p-4 rounded-xl border border-[#004A77]/10">
+                                                                    <h3 className="text-xs font-bold text-[#004A77] uppercase mb-2">{selectedPackageId === 'total_all' ? 'Overall Totals' : 'Package Totals'}</h3>
+                                                                    <div className="flex justify-between items-end">
+                                                                        <div><p className="text-[10px] text-gray-500 uppercase font-bold">Min / Likely / Max</p><p className="text-lg font-bold text-[#001D31] font-mono">{totalMin} / {totalLikely} / {totalMax}</p></div>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })()}
+                                                </div>
+                                            </section>
+                                        </div>
+                                    </div>
+                                    <div className="w-full space-y-6">
+                                        <section className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                                            <div className="bg-gray-50 px-6 py-3 border-b border-gray-200 flex items-center justify-between">
+                                                <h2 className="text-sm font-bold flex items-center gap-2 text-gray-700 uppercase tracking-wider"><FileText className="w-4 h-4 text-blue-600" />Work Packages</h2>
+                                                <button onClick={() => addTask()} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm"><Plus className="w-3.5 h-3.5" /> Add Row</button>
+                                            </div>
+                                            <div className="overflow-x-auto">
+                                                <table className="w-full text-left border-collapse table-fixed select-none">
+                                                    <thead>
+                                                        <tr className="bg-gray-100 border-b border-gray-300">
+                                                            <th className="w-24 border-r border-gray-300 bg-gray-200/50"></th>
+                                                            <th className="relative py-2 px-3 text-[10px] font-bold text-gray-600 uppercase border-r border-gray-300" style={{ width: colWidths.package }}>Package<div onMouseDown={(e) => handleResize('package', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-400 transition-colors" /></th>
+                                                            <th className="relative py-2 px-3 text-[10px] font-bold text-gray-600 uppercase border-r border-gray-300" style={{ width: colWidths.task }}>Task<div onMouseDown={(e) => handleResize('task', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-400 transition-colors" /></th>
+                                                            <th className="relative py-2 px-3 text-[10px] font-bold text-gray-600 uppercase border-r border-gray-300" style={{ width: colWidths.role }}>Role<div onMouseDown={(e) => handleResize('role', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-400 transition-colors" /></th>
+                                                            <th className="relative py-2 px-3 text-[10px] font-bold text-gray-600 uppercase border-r border-gray-300 text-center" style={{ width: colWidths.min }}>Min<div onMouseDown={(e) => handleResize('min', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-400 transition-colors" /></th>
+                                                            <th className="relative py-2 px-3 text-[10px] font-bold text-gray-600 uppercase border-r border-gray-300 text-center" style={{ width: colWidths.likely }}>Likely<div onMouseDown={(e) => handleResize('likely', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-400 transition-colors" /></th>
+                                                            <th className="relative py-2 px-3 text-[10px] font-bold text-gray-600 uppercase border-r border-gray-300 text-center" style={{ width: colWidths.max }}>Max<div onMouseDown={(e) => handleResize('max', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-400 transition-colors" /></th>
+                                                            <th className="relative py-2 px-3 text-[10px] font-bold text-gray-600 uppercase border-r border-gray-300" style={{ width: colWidths.comments }}>Comments<div onMouseDown={(e) => handleResize('comments', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-400 transition-colors" /></th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>{renderTaskRows(state.tasks)}</tbody>
+                                                </table>
+                                            </div>
+                                        </section>
+                                    </div>
+                                </motion.div>
+                            ) : (
+                                <motion.div key="results" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="space-y-8">
+                                    <div className="flex justify-center">
+                                        <div className="flex bg-[#EFF1F1] p-1 rounded-xl">
+                                            <button onClick={() => setResultsView('internal')} className={`px-6 py-2 rounded-lg text-sm font-semibold transition-all ${resultsView === 'internal' ? 'bg-white text-[#004A77] shadow-sm' : 'text-[#44474E] hover:bg-white/50'}`}>{state.rate1Name} Results</button>
+                                            <button onClick={() => setResultsView('external')} className={`px-6 py-2 rounded-lg text-sm font-semibold transition-all ${resultsView === 'external' ? 'bg-white text-[#004A77] shadow-sm' : 'text-[#44474E] hover:bg-white/50'}`}>{state.rate2Name} Results</button>
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                                        <section className="bg-white p-6 rounded-3xl border border-[#E1E3E1] shadow-sm">
+                                            <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><BarChart3 className="w-5 h-5 text-[#004A77]" />Probability Density ({resultsView === 'internal' ? state.rate1Name : state.rate2Name})</h3>
+                                            <div className="h-[350px] w-full">
+                                                <ResponsiveContainer width="100%" height="100%">
+                                                    <BarChart data={result?.[resultsView].histogram}>
+                                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F3F4" />
+                                                        <XAxis dataKey="bin" tickFormatter={(val) => formatCurrency(val)} axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#44474E' }} minTickGap={30} />
+                                                        <YAxis hide />
+                                                        <Tooltip cursor={{ fill: '#F1F3F4' }} content={({ active, payload }) => {
+                                                            if (active && payload && payload.length) {
+                                                                return (
+                                                                    <div className="bg-white p-3 border border-gray-200 shadow-xl rounded-xl">
+                                                                        <p className="text-xs font-bold text-gray-500 mb-1">Cost Range</p>
+                                                                        <p className="text-sm font-bold text-[#004A77]">{formatCurrency(payload[0].payload.bin)}</p>
+                                                                        <p className="text-[10px] text-gray-400 mt-1">{payload[0].value} occurrences</p>
+                                                                    </div>
+                                                                );
+                                                            }
+                                                            return null;
+                                                        }} />
+                                                        <Bar dataKey="count" fill="#004A77" radius={[4, 4, 0, 0]} />
+                                                    </BarChart>
+                                                </ResponsiveContainer>
+                                            </div>
+                                        </section>
+                                        <section className="bg-white p-6 rounded-3xl border border-[#E1E3E1] shadow-sm">
+                                            <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><TrendingUp className="w-5 h-5 text-[#004A77]" />Cumulative Probability (S-Curve)</h3>
+                                            <div className="h-[350px] w-full">
+                                                <ResponsiveContainer width="100%" height="100%">
+                                                    <AreaChart data={result?.[resultsView].cumulative}>
+                                                        <CartesianGrid strokeDasharray="3 3" stroke="#F1F3F4" />
+                                                        <XAxis dataKey="value" tickFormatter={(val) => formatCurrency(val)} axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#44474E' }} minTickGap={40} />
+                                                        <YAxis domain={[0, 100]} tickFormatter={(val) => `${val}%`} axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#44474E' }} />
+                                                        <Tooltip content={({ active, payload }) => {
+                                                            if (active && payload && payload.length) {
+                                                                return (
+                                                                    <div className="bg-white p-3 border border-gray-200 shadow-xl rounded-xl">
+                                                                        <p className="text-xs font-bold text-gray-500 mb-1">Confidence Level</p>
+                                                                        <p className="text-sm font-bold text-[#004A77]">{payload[0].value.toFixed(1)}%</p>
+                                                                        <p className="text-[10px] text-gray-400 mt-1">Cost: {formatCurrency(payload[0].payload.value)}</p>
+                                                                    </div>
+                                                                );
+                                                            }
+                                                            return null;
+                                                        }} />
+                                                        <Area type="monotone" dataKey="probability" stroke="#004A77" strokeWidth={3} fill="url(#colorProb)" />
+                                                        <defs><linearGradient id="colorProb" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#004A77" stopOpacity={0.3} /><stop offset="95%" stopColor="#004A77" stopOpacity={0} /></linearGradient></defs>
+                                                        <ReferenceLine y={50} stroke="#44474E" strokeDasharray="3 3" label={{ value: 'P50', position: 'right', fontSize: 10, fill: '#44474E' }} />
+                                                        <ReferenceLine y={80} stroke="#BA1A1A" strokeDasharray="3 3" label={{ value: 'P80', position: 'right', fontSize: 10, fill: '#BA1A1A' }} />
+                                                    </AreaChart>
+                                                </ResponsiveContainer>
+                                            </div>
+                                        </section>
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                                        {[
+                                            { label: 'Mean Estimate', value: result?.[resultsView].mean, icon: BarChart3, color: 'text-blue-600' },
+                                            { label: 'P50 (Median)', value: result?.[resultsView].p50, icon: ShieldCheck, color: 'text-green-600' },
+                                            { label: 'P80 (Recommended)', value: result?.[resultsView].p80, icon: AlertTriangle, color: 'text-orange-600' },
+                                            { label: 'P90 (Conservative)', value: result?.[resultsView].p90, icon: ShieldCheck, color: 'text-red-600' }
+                                        ].map((stat, i) => (
+                                            <div key={i} className="bg-white p-6 rounded-3xl border border-[#E1E3E1] shadow-sm">
+                                                <div className="flex items-center gap-3 mb-2">
+                                                    <div className={`p-2 rounded-lg bg-gray-50 ${stat.color}`}><stat.icon className="w-4 h-4" /></div>
+                                                    <p className="text-xs font-bold text-[#44474E] uppercase">{stat.label}</p>
+                                                </div>
+                                                <p className="text-2xl font-bold text-[#001D31]">{formatCurrency(stat.value || 0)}</p>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+                    </main>
+                </div>
+            );
+        }
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
