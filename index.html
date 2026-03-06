@@ -88,19 +88,12 @@
         }
 
         function runSimulation(state) {
-            const { iterations, tasks, roles, overheadDays, profitMargin } = state;
+            const { iterations, tasks, roles } = state;
             const internalResults = [];
             const externalResults = [];
             
             const flatTasks = getAllTasks(tasks);
             const roleMap = new Map(roles.map(r => [r.id, r]));
-
-            const avgInternalRate = roles.length > 0 
-                ? roles.reduce((sum, r) => sum + r.rate1, 0) / roles.length 
-                : 0;
-            const avgExternalRate = roles.length > 0 
-                ? roles.reduce((sum, r) => sum + r.rate2, 0) / roles.length 
-                : 0;
 
             for (let i = 0; i < iterations; i++) {
                 let iterationInternalCost = 0;
@@ -117,14 +110,8 @@
                     }
                 }
 
-                iterationInternalCost += overheadDays * avgInternalRate;
-                iterationExternalCost += overheadDays * avgExternalRate;
-
-                const finalInternal = iterationInternalCost * (1 + profitMargin / 100);
-                const finalExternal = iterationExternalCost * (1 + profitMargin / 100);
-                
-                internalResults.push(finalInternal);
-                externalResults.push(finalExternal);
+                internalResults.push(iterationInternalCost);
+                externalResults.push(iterationExternalCost);
             }
 
             const processResults = (results) => {
@@ -136,6 +123,11 @@
                 const p50 = results[Math.floor(iterations * 0.5)];
                 const p80 = results[Math.floor(iterations * 0.8)];
                 const p90 = results[Math.floor(iterations * 0.9)];
+
+                const percentiles = {};
+                for (let p = 10; p <= 90; p += 10) {
+                    percentiles[p] = results[Math.floor(iterations * (p / 100))];
+                }
 
                 const binCount = 30;
                 const binSize = (max - min) / binCount || 1;
@@ -159,7 +151,7 @@
                     });
                 }
 
-                return { totalCosts: results, p50, p80, p90, min, max, mean, histogram, cumulative };
+                return { totalCosts: results, p50, p80, p90, min, max, mean, histogram, cumulative, percentiles };
             };
 
             return {
@@ -187,19 +179,19 @@
                 summaryData.push(
                     ['Internal Results', ''],
                     ['Mean Estimate', result.internal.mean],
-                    ['P50 (Median)', result.internal.p50],
-                    ['P80 (Recommended)', result.internal.p80],
-                    ['P90 (Conservative)', result.internal.p90],
                     ['Minimum Observed', result.internal.min],
                     ['Maximum Observed', result.internal.max],
                     [],
+                    ['Internal Percentiles', 'Cost'],
+                    ...Object.entries(result.internal.percentiles).map(([p, val]) => [`P${p}`, val]),
+                    [],
                     ['External Results', ''],
                     ['Mean Estimate', result.external.mean],
-                    ['P50 (Median)', result.external.p50],
-                    ['P80 (Recommended)', result.external.p80],
-                    ['P90 (Conservative)', result.external.p90],
                     ['Minimum Observed', result.external.min],
-                    ['Maximum Observed', result.external.max]
+                    ['Maximum Observed', result.external.max],
+                    [],
+                    ['External Percentiles', 'Cost'],
+                    ...Object.entries(result.external.percentiles).map(([p, val]) => [`P${p}`, val])
                 );
             } else {
                 summaryData.push(['No simulation results available. Run simulation first.']);
@@ -356,8 +348,6 @@
                 },
                 { id: 't2', name: '2.0 Implementation', roleId: 'r2', minDays: 10, likelyDays: 15, maxDays: 25 },
             ],
-            overheadDays: 0,
-            profitMargin: 0,
             iterations: 10000,
         };
 
@@ -558,10 +548,6 @@
                                                 <h2 className="text-lg font-bold mb-4 flex items-center gap-2 text-[#001D31]"><TrendingUp className="w-5 h-5 text-[#004A77]" />Simulation Config</h2>
                                                 <div className="space-y-4">
                                                     <div><label className="block text-xs font-bold text-[#44474E] uppercase mb-1.5">Iterations</label><input type="number" value={state.iterations} onChange={(e) => setState(prev => ({ ...prev, iterations: Number(e.target.value) }))} onFocus={(e) => e.target.select()} className="w-full px-4 py-2.5 bg-[#F1F3F4] border-none rounded-xl focus:ring-2 focus:ring-[#004A77] outline-none transition-all" /></div>
-                                                    <div className="grid grid-cols-2 gap-4">
-                                                        <div><label className="block text-xs font-bold text-[#44474E] uppercase mb-1.5">Profit (%)</label><input type="number" value={state.profitMargin} onChange={(e) => setState(prev => ({ ...prev, profitMargin: Number(e.target.value) }))} onFocus={(e) => e.target.select()} className="w-full px-4 py-2.5 bg-[#F1F3F4] border-none rounded-xl focus:ring-2 focus:ring-[#004A77] outline-none transition-all" /></div>
-                                                        <div><label className="block text-xs font-bold text-[#44474E] uppercase mb-1.5">Overhead (d)</label><input type="number" value={state.overheadDays} onChange={(e) => setState(prev => ({ ...prev, overheadDays: Number(e.target.value) }))} onFocus={(e) => e.target.select()} className="w-full px-4 py-2.5 bg-[#F1F3F4] border-none rounded-xl focus:ring-2 focus:ring-[#004A77] outline-none transition-all" /></div>
-                                                    </div>
                                                 </div>
                                             </section>
                                         </div>
@@ -686,7 +672,7 @@
                                         </div>
                                     </div>
                                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                                        <section className="bg-white p-6 rounded-3xl border border-[#E1E3E1] shadow-sm">
+                                        <section className="p-6">
                                             <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><BarChart3 className="w-5 h-5 text-[#004A77]" />Probability Density ({resultsView === 'internal' ? state.rate1Name : state.rate2Name})</h3>
                                             <div className="h-[350px] w-full">
                                                 <ResponsiveContainer width="100%" height="100%">
@@ -711,13 +697,22 @@
                                                 </ResponsiveContainer>
                                             </div>
                                         </section>
-                                        <section className="bg-white p-6 rounded-3xl border border-[#E1E3E1] shadow-sm">
+                                        <section className="p-6">
                                             <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><TrendingUp className="w-5 h-5 text-[#004A77]" />Cumulative Probability (S-Curve)</h3>
                                             <div className="h-[350px] w-full">
                                                 <ResponsiveContainer width="100%" height="100%">
                                                     <AreaChart data={result?.[resultsView].cumulative}>
                                                         <CartesianGrid strokeDasharray="3 3" stroke="#F1F3F4" />
-                                                        <XAxis dataKey="value" tickFormatter={(val) => formatCurrency(val)} axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#44474E' }} minTickGap={40} />
+                                                        <XAxis 
+                                                            dataKey="value" 
+                                                            type="number"
+                                                            domain={['dataMin', 'dataMax']}
+                                                            tickFormatter={(val) => formatCurrency(val)} 
+                                                            axisLine={false} 
+                                                            tickLine={false} 
+                                                            tick={{ fontSize: 10, fill: '#44474E' }} 
+                                                            minTickGap={40} 
+                                                        />
                                                         <YAxis domain={[0, 100]} tickFormatter={(val) => `${val}%`} axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#44474E' }} />
                                                         <Tooltip content={({ active, payload }) => {
                                                             if (active && payload && payload.length) {
@@ -733,28 +728,32 @@
                                                         }} />
                                                         <Area type="monotone" dataKey="probability" stroke="#004A77" strokeWidth={3} fill="url(#colorProb)" />
                                                         <defs><linearGradient id="colorProb" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#004A77" stopOpacity={0.3} /><stop offset="95%" stopColor="#004A77" stopOpacity={0} /></linearGradient></defs>
-                                                        <ReferenceLine y={50} stroke="#44474E" strokeDasharray="3 3" label={{ value: 'P50', position: 'right', fontSize: 10, fill: '#44474E' }} />
-                                                        <ReferenceLine y={80} stroke="#BA1A1A" strokeDasharray="3 3" label={{ value: 'P80', position: 'right', fontSize: 10, fill: '#BA1A1A' }} />
                                                     </AreaChart>
                                                 </ResponsiveContainer>
                                             </div>
                                         </section>
                                     </div>
-                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                                        {[
-                                            { label: 'Mean Estimate', value: result?.[resultsView].mean, icon: BarChart3, color: 'text-blue-600' },
-                                            { label: 'P50 (Median)', value: result?.[resultsView].p50, icon: ShieldCheck, color: 'text-green-600' },
-                                            { label: 'P80 (Recommended)', value: result?.[resultsView].p80, icon: AlertTriangle, color: 'text-orange-600' },
-                                            { label: 'P90 (Conservative)', value: result?.[resultsView].p90, icon: ShieldCheck, color: 'text-red-600' }
-                                        ].map((stat, i) => (
-                                            <div key={i} className="bg-white p-6 rounded-3xl border border-[#E1E3E1] shadow-sm">
-                                                <div className="flex items-center gap-3 mb-2">
-                                                    <div className={`p-2 rounded-lg bg-gray-50 ${stat.color}`}><stat.icon className="w-4 h-4" /></div>
-                                                    <p className="text-xs font-bold text-[#44474E] uppercase">{stat.label}</p>
-                                                </div>
-                                                <p className="text-2xl font-bold text-[#001D31]">{formatCurrency(stat.value || 0)}</p>
-                                            </div>
-                                        ))}
+                                    <div className="max-w-2xl mx-auto bg-white rounded-2xl border border-[#E1E3E1] shadow-sm overflow-hidden">
+                                        <table className="w-full text-left border-collapse">
+                                            <thead>
+                                                <tr className="bg-gray-50 border-b border-[#E1E3E1]">
+                                                    <th className="px-6 py-3 text-xs font-bold text-[#44474E] uppercase tracking-wider">Confidence Level</th>
+                                                    <th className="px-6 py-3 text-xs font-bold text-[#44474E] uppercase tracking-wider text-right">Estimated Cost ({resultsView === 'internal' ? state.rate1Name : state.rate2Name})</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-[#E1E3E1]">
+                                                <tr className="hover:bg-gray-50/50 transition-colors">
+                                                    <td className="px-6 py-3 text-sm font-medium text-[#44474E]">Mean Estimate</td>
+                                                    <td className="px-6 py-3 text-sm font-bold text-[#001D31] text-right">{formatCurrency(result?.[resultsView].mean || 0)}</td>
+                                                </tr>
+                                                {Object.entries(result?.[resultsView].percentiles || {}).map(([p, val]) => (
+                                                    <tr key={p} className={`hover:bg-gray-50/50 transition-colors ${p === '80' ? 'bg-blue-50/30' : ''}`}>
+                                                        <td className="px-6 py-3 text-sm font-medium text-[#44474E]">P{p} (Confidence {p}%)</td>
+                                                        <td className="px-6 py-3 text-sm font-bold text-[#001D31] text-right">{formatCurrency(val)}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
                                     </div>
                                 </motion.div>
                             )}
